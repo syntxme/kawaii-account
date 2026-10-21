@@ -313,9 +313,9 @@ class App:
         title = job["title"]
         if not title:
             post = await self.client.get_messages(job["chat_id"], ids=job["msg_id"])
-            title = await self.source.title(job["bot"], job["param"], post.message if post else "")
-            self.db.update_job(job["id"], title=title)
-        log.info("Vazifa #%d: «%s»", job["id"], title)
+            title, count = await self.source.title(job["bot"], job["param"], post.message if post else "")
+            self.db.update_job(job["id"], title=title, src_eps=count)
+        log.info("Vazifa #%d: «%s», manbada %s qism", job["id"], title, self.db.job(job["id"])["src_eps"] or "?")
 
         # 2) Aynan shu nom yoki 3) imlo xatosi bilan yozilgan o'sha nom (raqamlar mos bo'lishi shart)
         kid = self.db.known_id(norm(title))
@@ -343,6 +343,7 @@ class App:
     async def ask_id(self, job) -> None:
         lines = [
             f"🆕 <b>{escape(job['title'])}</b>",
+            f"📺 Qismlar: <b>{job['src_eps'] or '?'}</b> ta",
             f"📎 {await self.post_link(job)}",
             f"🤖 @{job['bot']}",
         ]

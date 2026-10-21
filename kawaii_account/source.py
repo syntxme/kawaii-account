@@ -58,6 +58,12 @@ def watch_button(m: Message) -> Btn | None:
     return next((b for b in buttons(m) if any(w in b.text.lower() for w in WATCH_WORDS)), None)
 
 
+def episode_count(text: str) -> int | None:
+    """Kartochka/postdagi "🎥 Qismi: 9" (yoki "Qismlar soni: 9", "Epizod: 9")."""
+    mt = re.search(r"(?i)(?:qism\w*|epizod\w*|seriya\w*)(?:\s+soni)?\s*[:\-–]\s*(\d+)", text or "")
+    return int(mt.group(1)) if mt else None
+
+
 def caption_number(text: str) -> int | None:
     nums = re.findall(r"\d+", text or "")
     return int(nums[0]) if len(nums) == 1 else None
@@ -81,10 +87,13 @@ class Source:
         self.client = client
         self.watcher = watcher
         self.on_join = on_join  # majburan qo'shilgan homiy chat — keyin chiqib ketish uchun yozib qo'yiladi
+        self.count: int | None = None  # oxirgi `title()` da aniqlangan qismlar soni
 
-    async def title(self, bot_name: str, param: str, post_text: str) -> str:
-        """Faqat anime nomini aniqlash: homiylardan o'tib, kartochka yoki qismlar menyusigacha."""
-        return await self.grab(bot_name, param, post_text, None)
+    async def title(self, bot_name: str, param: str, post_text: str) -> tuple[str, int | None]:
+        """Faqat anime nomi va manbadagi qismlar soni: homiylardan o'tib, kartochka yoki qismlar menyusigacha."""
+        self.count = episode_count(post_text)
+        title = await self.grab(bot_name, param, post_text, None)
+        return title, self.count
 
     async def grab(self, bot_name: str, param: str, post_text: str, on_episode: OnEpisode | None, min_n: int = 1) -> str:
         """Botdan `min_n` va undan keyingi qismlarni oladi; har bir qism `on_episode` ga beriladi.
@@ -99,6 +108,8 @@ class Source:
             for step in range(6):
                 log.info("@%s: %d-qadam, %d ta xabar", bot_name, step + 1, len(screen))
                 if menu := self._latest_menu(inbox):
+                    if self.count is None:
+                        self.count = max(n for n, _ in episode_buttons(menu))
                     title = card_title or clean_title(menu.message) or clean_title(post_text) or bot_name
                     if on_episode:
                         await self._collect_menu(inbox, menu, on_episode, min_n)
@@ -106,6 +117,7 @@ class Source:
                 card = next((m for m in reversed(screen) if watch_button(m)), None)
                 if card:
                     card_title = clean_title(card.message)
+                    self.count = episode_count(card.message) or self.count
                     if on_episode is None and card_title:
                         return card_title
                     log.info("@%s: «%s» — %s", bot_name, card_title, watch_button(card).text)

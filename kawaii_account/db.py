@@ -70,6 +70,9 @@ class Db:
         # next_ep: Kawaii'da qaysi epizoddan boshlab kerak (keyin qo'shilgan ustun)
         if "next_ep" not in {r[1] for r in self.c.execute("PRAGMA table_info(jobs)")}:
             self.c.execute("ALTER TABLE jobs ADD COLUMN next_ep INTEGER")
+        # src_eps: manbadagi qismlar soni (kartochkadagi "Qismi: 9")
+        if "src_eps" not in {r[1] for r in self.c.execute("PRAGMA table_info(jobs)")}:
+            self.c.execute("ALTER TABLE jobs ADD COLUMN src_eps INTEGER")
         # known.title: asl nom (o'xshash nomlarni solishtirish uchun)
         if "title" not in {r[1] for r in self.c.execute("PRAGMA table_info(known)")}:
             self.c.execute("ALTER TABLE known ADD COLUMN title TEXT")
