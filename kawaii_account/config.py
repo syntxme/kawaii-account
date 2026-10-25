@@ -21,6 +21,7 @@ class Config:
     owner: str
     storage_chat: str | int
     db_path: str
+    recipes_dir: str
 
 
 def load() -> Config:
@@ -41,4 +42,5 @@ def load() -> Config:
         owner=os.getenv("OWNER", "syntxme").lstrip("@"),
         storage_chat=_chat(os.getenv("STORAGE_CHAT", "me")),
         db_path=os.getenv("DB_PATH", "data/state.db"),
+        recipes_dir=os.getenv("RECIPES_DIR", "data/recipes"),
     )

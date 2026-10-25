@@ -10,6 +10,7 @@ from telethon.tl import types
 from telethon.tl.custom import Message
 
 from .pace import pause
+from .recipes import Recipes, matches
 from .tg import JOIN_DELAY, Btn, Inbox, buttons, mute, send, NeedHuman, Watcher, cb_buttons, click, is_video, join, parse_tme, url_buttons
 
 log = logging.getLogger(__name__)
@@ -53,9 +54,24 @@ def current_episode(m: Message) -> int | None:
     return None
 
 
-def watch_button(m: Message) -> Btn | None:
-    """Anime kartochkasidagi "Tomosha qilish" / "Yuklab olish" tugmasi."""
-    return next((b for b in buttons(m) if any(w in b.text.lower() for w in WATCH_WORDS)), None)
+def watch_button(m: Message, recipe: dict | None = None) -> Btn | None:
+    """Anime kartochkasidagi "Tomosha qilish" / "Yuklab olish" (yoki retseptda o'rganilgan) tugma."""
+    recipe = recipe or {}
+    words = [*WATCH_WORDS, *recipe.get("press", [])]
+    return next(
+        (b for b in buttons(m) if matches(b.text, words) and not matches(b.text, recipe.get("never", []))),
+        None,
+    )
+
+
+class Teach(NeedHuman):
+    """Bot ekranini tushunmadim — egasi qaysi tugmani bosishni ko'rsatishi kerak."""
+
+    def __init__(self, bot: str, msg: Message, role: str, reason: str) -> None:
+        super().__init__(reason)
+        self.bot = bot
+        self.msg = msg
+        self.role = role  # o'rganilgan tugma retseptda qaysi ro'lga yoziladi: "press" | "check"
 
 
 def episode_count(text: str) -> int | None:
@@ -83,9 +99,10 @@ def doc_id(m: Message) -> int | None:
 
 
 class Source:
-    def __init__(self, client: TelegramClient, watcher: Watcher, on_join: Callable[[object], None]) -> None:
+    def __init__(self, client: TelegramClient, watcher: Watcher, recipes: Recipes, on_join: Callable[[object], None]) -> None:
         self.client = client
         self.watcher = watcher
+        self.recipes = recipes
         self.on_join = on_join  # majburan qo'shilgan homiy chat — keyin chiqib ketish uchun yozib qo'yiladi
         self.count: int | None = None  # oxirgi `title()` da aniqlangan qismlar soni
 
@@ -102,6 +119,7 @@ class Source:
         if not (isinstance(bot, types.User) and bot.bot):
             raise NeedHuman(f"@{bot_name} bot emas")
         await mute(self.client, bot)  # manba bot ko'p video yuboradi
+        recipe = self.recipes.get(bot_name)
         with self.watcher.watch(bot.id, bot_name) as inbox:
             screen = await self._start(bot, param, inbox)
             card_title = None
@@ -114,14 +132,15 @@ class Source:
                     if on_episode:
                         await self._collect_menu(inbox, menu, on_episode, min_n)
                     return title
-                card = next((m for m in reversed(screen) if watch_button(m)), None)
+                card = next((m for m in reversed(screen) if watch_button(m, recipe)), None)
                 if card:
-                    card_title = clean_title(card.message)
+                    card_title = clean_title(card.message) or card_title
                     self.count = episode_count(card.message) or self.count
                     if on_episode is None and card_title:
                         return card_title
-                    log.info("@%s: «%s» — %s", bot_name, card_title, watch_button(card).text)
-                    screen = await self._press(bot, bot_name, inbox, card, watch_button(card))
+                    btn = watch_button(card, recipe)
+                    log.info("@%s: «%s» — %s", bot_name, card_title, btn.text)
+                    screen = await self._press(bot, bot_name, inbox, card, btn)
                     continue
                 videos = [m for m in screen if is_video(m)]
                 if videos:
@@ -130,13 +149,24 @@ class Source:
                     return clean_title(videos[0].message) or clean_title(post_text) or bot_name
                 sponsor = next((m for m in reversed(screen) if self._sponsor_links(m, bot_name)), None)
                 if sponsor:
-                    screen = await self._pass_sponsors(bot, bot_name, param, inbox, sponsor)
+                    screen = await self._pass_sponsors(bot, bot_name, param, inbox, sponsor, recipe)
                     continue
                 if step == 0:
                     screen = await self._start(bot, param, inbox)
                     continue
-                raise NeedHuman(f"@{bot_name} javobini tushunmadim (qism tugmalari ham, video ham yo'q)")
-        raise NeedHuman(f"@{bot_name} qismlar ro'yxatiga yetib bora olmadim (6 urinish)")
+                self._teach(bot_name, inbox, "press", f"@{bot_name} javobini tushunmadim (qism tugmalari ham, video ham yo'q)")
+            self._teach(bot_name, inbox, "press", f"@{bot_name} qismlar ro'yxatiga yetib bora olmadim (6 urinish)")
+        raise NeedHuman(f"@{bot_name}: tushunmadim")
+
+    def _teach(self, bot_name: str, inbox: Inbox, role: str, reason: str) -> None:
+        """Botning tugmali oxirgi xabari bo'yicha egasidan o'rganish so'raladi (tugmasiz bo'lsa — oddiy xato)."""
+        screens = [m for m in inbox.latest.values() if buttons(m)]
+        if not screens:
+            raise NeedHuman(reason)
+        msg = max(screens, key=lambda m: m.id)
+        if self._sponsor_links(msg, bot_name):
+            role = "check"
+        raise Teach(bot_name, msg, role, reason)
 
     async def _press(self, bot, bot_name: str, inbox: Inbox, msg: Message, btn: Btn) -> list[Message]:
         """Tugmani bosish: callback — bosamiz; botning o'ziga ?start= havola — /start yuboramiz."""
@@ -170,7 +200,7 @@ class Source:
             out.append(b.url)
         return out
 
-    async def _pass_sponsors(self, bot, bot_name: str, param: str, inbox: Inbox, msg: Message) -> list[Message]:
+    async def _pass_sponsors(self, bot, bot_name: str, param: str, inbox: Inbox, msg: Message, recipe: dict) -> list[Message]:
         urls = self._sponsor_links(msg, bot_name)
         log.info("@%s: %d ta homiy", bot_name, len(urls))
         joined = False
@@ -188,8 +218,9 @@ class Source:
             joined = True
 
         # "Tekshirish" tugmasi: callback bo'lsa bosamiz, botning o'ziga havola bo'lsa — /start qayta
-        checks = cb_buttons(msg)
-        btn = next((b for b in checks if any(w in b.text.lower() for w in CHECK_WORDS)), checks[-1] if checks else None)
+        checks = [b for b in cb_buttons(msg) if not matches(b.text, recipe["never"])]
+        words = [*CHECK_WORDS, *recipe["check"]]
+        btn = next((b for b in checks if matches(b.text, words)), checks[-1] if checks else None)
         if btn is None:
             return await self._start(bot, param, inbox)
         inbox.drain()
@@ -199,7 +230,7 @@ class Source:
             await asyncio.sleep(JOIN_DELAY)
         screen = await inbox.settle(quiet=3, timeout=20)
         # Tekshiruvdan keyin bot animeni o'zi bermasa — postdagi /start ni qaytaramiz
-        if not any(is_video(m) or episode_buttons(m) or watch_button(m) for m in screen):
+        if not any(is_video(m) or episode_buttons(m) or watch_button(m, recipe) for m in screen):
             screen = await self._start(bot, param, inbox)
         return screen
 

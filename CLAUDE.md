@@ -15,12 +15,15 @@ Kawaii UZ support akkaunti (userbot) boshqa anime kanallari/botlaridan yangi ani
 6. Homiylik uchun majburan qo'shilgan kanallar (`joined`) 24 soatdan keyin tark etiladi (oldindan a'zo bo'lganlariga tegilmaydi). Homiy kanallar, homiy botlar va manba bot qo'shilgach mute qilinadi (akkaunt egasining Telegramiga ham ulangan).
 5. Akkaunt Kawaii bot orqali **epizod qo'shadi** (pastdagi "Kawaii botga yuklash").
 
-### 2-bosqich: o'rgatish rejimi (keyin)
+### 2-bosqich: o'rgatish (savol-javob)
 
-Botlar har xil tuzilgan — har biri uchun **retsept** kerak. "O'zi kuzatib tushunadi" emas, **yozib olish → qayta ishlatish**:
-- `/learn <bot>` (@syntxme dan yoki akkauntning Saved Messages'ida) → foydalanuvchi akkauntdan qo'lda bir marta anime oladi (kanal → bot → homiylar → qismlar), akkaunt har qadamni yozib oladi.
-- Qadamlar **umumlashtirilib** saqlanadi: tugma aniq matni emas, namuna (raqam, "tekshir" so'zi, joylashuvi, "keyingi ▶️"), shunda keyingi animelarda ham ishlaydi.
-- Retsept — o'qiladigan JSON/YAML fayl, qo'lda tuzatsa bo'ladi. Retsepti yo'q botga duch kelsa → @syntxme ga "bu botni o'rgating".
+Telegram o'z sessiyasidan bosilgan inline tugmani boshqa sessiyaga yubormaydi — shuning uchun "qo'lda bajaraman, akkaunt kuzatadi" ishlamaydi. O'rniga:
+- Manba botda tiqilib qolsa (`Teach`) — @syntxme ga botning oxirgi xabari va raqamlangan tugmalari yuboriladi (`need_teach`). Javobga raqam → tugma matni umumlashtirilib (`recipes.pattern`: kichik harf, emoji/raqamsiz) `data/recipes/<bot>.json` ga yoziladi, vazifa to'xtagan bosqichdan davom etadi.
+- Retsept rollari: `press` (kartochka → qismlar), `check` (homiy tekshiruvi), `never`. Qo'lda tuzatsa bo'ladi. `/learn @bot`, `/forget @bot so'z`.
+
+## Deploy
+
+Server: `/root/other-bots/kawaii-account`, pm2 `kawaii-account`. Cron har daqiqada `deploy/update.sh`: `origin/main` o'zgarsa — `git reset --hard`, kerak bo'lsa pip, `pm2 restart`. `.env`, `kawaii_account.session`, `data/` serverda qo'lda. Bitta sessiya bir vaqtda faqat bitta joyda ishlasin (lokal + server birga — sessiya bekor bo'lishi mumkin).
 
 ## Kawaii botga yuklash (mavjud admin oqimi — Kawaii bot kodini o'zgartirmaymiz)
 

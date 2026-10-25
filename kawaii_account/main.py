@@ -11,6 +11,7 @@ Vazifa bosqichlari (jobs.status):
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -27,7 +28,9 @@ from .kawaii import Kawaii
 from .match import AUTO, norm, rank
 from .pace import pause
 from .source import Source
-from .tg import JOIN_DELAY, NeedHuman, Watcher, leave, parse_tme, url_buttons
+from .recipes import Recipes, pattern
+from .source import Teach
+from .tg import JOIN_DELAY, NeedHuman, Watcher, buttons, leave, parse_tme, url_buttons
 
 log = logging.getLogger("kawaii_account")
 
@@ -35,8 +38,10 @@ POST_LINK = re.compile(r"(?:https?://)?t\.me/(?:c/(\d+)|([A-Za-z0-9_]{4,}))/(\d+
 SKIP_WORDS = ("skip", "yo'q", "otkaz", "o'tkaz", "kerakmas", "kerak emas")
 RETRY_WORDS = ("qayta", "retry", "yana")
 FINAL = ("done", "skipped", "failed")
+WAITING = ("need_id", "need_teach")  # egasining javobi kutilmoqda
 ACTIVE = ("probing", "checking", "collecting", "uploading")
 LEAVE_AFTER = 24 * 3600  # homiy kanallardan chiqish (s)
+SCAN_INTERVAL = 10 * 60  # kanal skani tugagach, yangi postlarni qayta tekshirish oralig'i (s)
 
 
 def start_link(m: Message) -> tuple[str, str] | None:
@@ -58,7 +63,8 @@ class App:
         self.cfg = cfg
         self.db = Db(cfg.db_path)
         self.watcher = Watcher(client)
-        self.source = Source(client, self.watcher, self.on_join)
+        self.recipes = Recipes(cfg.recipes_dir)
+        self.source = Source(client, self.watcher, self.recipes, self.on_join)
         self.kawaii = Kawaii(client, self.watcher, cfg.kawaii_bot, cfg.storage_chat)
         # Bir vaqtda bitta vazifa: botlar bilan suhbatlar aralashib ketmasin
         self.lock = asyncio.Lock()
@@ -83,6 +89,18 @@ class App:
         m: Message = ev.message
         text = (m.message or "").strip()
         log.info("← @%s: %s", self.cfg.owner, text)
+        # Akkaunt so'roviga javob — so'rov turiga qarab
+        if m.is_reply and (job := self.db.job_by_owner_msg(m.reply_to_msg_id)):
+            if job["status"] == "need_id":
+                await self.on_id(m, job, text)
+            elif job["status"] == "need_teach":
+                await self.on_teach(m, job, text)
+            else:
+                await self.on_owner_reply(m, job, text)
+            return
+        if text.startswith("/"):
+            await self.on_command(m, text)
+            return
         # ID kutilayotgan bo'lsa — faqat raqam qabul qilinadi
         if waiting := self.db.jobs_with_status("need_id"):
             # Reply bo'lsa — o'sha so'rovga, aks holda eng oxirgi yuborilgan so'rovga
@@ -98,8 +116,47 @@ class App:
         if mt := POST_LINK.search(text):
             await self.on_post_link(m, mt)
             return
-        if text in ("/jobs", "/status"):
+
+    async def on_command(self, m: Message, text: str) -> None:
+        cmd, _, arg = text.partition(" ")
+        bot = arg.strip().split(" ")[0].lstrip("@")
+        if cmd in ("/jobs", "/status"):
             await m.reply(self.status_text())
+        elif cmd in ("/learn", "/recipe") and bot:
+            await m.reply(
+                f"📚 <b>@{escape(bot)}</b> retsepti:\n<pre>{escape(self.recipes.show(bot))}</pre>\n"
+                "Akkaunt bu botda tiqilib qolsa, tugmalar ro'yxatini yuboradi — bosish kerak bo'lganining raqamini "
+                "javob qilib yuborasiz va u shu yerga yoziladi.\n"
+                f"O'chirish: <code>/forget @{escape(bot)} so'z</code>"
+            )
+        elif cmd == "/forget" and bot:
+            word = arg.strip().split(" ", 1)[1] if " " in arg.strip() else ""
+            ok = word and self.recipes.remove(bot, word.lower())
+            await m.reply("🗑 O'chirildi" if ok else "Bunday so'z retseptda yo'q")
+        else:
+            await m.reply(
+                "Buyruqlar:\n<code>/jobs</code> — ochiq vazifalar\n<code>/learn @bot</code> — bot retsepti\n"
+                "<code>/forget @bot so'z</code> — retseptdan o'chirish\nPost havolasi — postni qo'lda ishlash"
+            )
+
+    async def on_teach(self, m: Message, job, text: str) -> None:
+        """O'rgatish: egasi botning qaysi tugmasini bosish kerakligini raqam bilan ko'rsatdi."""
+        info = json.loads(job["note"] or "{}")
+        btns = info.get("buttons", [])
+        mt = re.fullmatch(r"\s*(\d{1,3})\s*", text)
+        if not mt or int(mt.group(1)) > len(btns):
+            await m.reply(f"🔢 Tugma raqamini yuboring (1–{len(btns)}), o'tkazish — 0")
+            return
+        n = int(mt.group(1))
+        if n == 0:
+            self.db.update_job(job["id"], status="skipped")
+            await m.reply("👌 O'tkazib yubordim")
+            return
+        word = pattern(btns[n - 1])
+        self.recipes.add(info["bot"], info["role"], word)
+        await m.reply(f"📚 @{escape(info['bot'])}: «{escape(word)}» tugmasini bosishni o'rgandim, davom etyapman")
+        self.db.update_job(job["id"], status=info.get("resume", "probing"), note=None)
+        self.spawn(job["id"])
 
     async def on_id(self, m: Message, job, text: str) -> None:
         mt = re.fullmatch(r"#?\s*(\d{1,9})", text)
@@ -153,7 +210,7 @@ class App:
         await m.reply(f"▶️ Vazifa #{job_id} boshlandi")
 
     def status_text(self) -> str:
-        rows = self.db.jobs_with_status(*ACTIVE, "need_id", "failed")[-15:]
+        rows = self.db.jobs_with_status(*ACTIVE, *WAITING, "failed")[-15:]
         if not rows:
             return "Ochiq vazifalar yo'q"
         return "\n".join(escape(f"#{r['id']} {r['status']} — {r['title'] or r['bot']} {r['note'] or ''}") for r in rows)
@@ -181,7 +238,7 @@ class App:
         if not newer:
             log.info("Post %s: @%s start=%s — shu anime #%d vazifada bor (%s), o'tkazildi", name, bot, param, prev["id"], prev["status"])
             return False
-        if prev["status"] in (*ACTIVE, "need_id", "skipped"):
+        if prev["status"] in (*ACTIVE, *WAITING, "skipped"):
             log.info("Post %s: @%s start=%s — #%d vazifa %s, o'tkazildi", name, bot, param, prev["id"], prev["status"])
             return False
         return True
@@ -194,11 +251,16 @@ class App:
         return job_id
 
     async def scan(self, channels, limit: int | None) -> None:
-        for ch in channels:
-            try:
-                await self.scan_channel(ch, limit)
-            except Exception:
-                log.exception("Skan yiqildi: %s", getattr(ch, "username", None) or ch.id)
+        """Kanallarni to'xtovsiz skan qilish. Bir aylana tugagach SCAN_INTERVAL kutib, qayta boshlanadi:
+        skan paytida (yoki dastur o'chiq paytida) kanalga tushgan yangi postlar keyingi aylanada ishlanadi."""
+        while True:
+            for ch in channels:
+                try:
+                    await self.scan_channel(ch, limit)
+                except Exception:
+                    log.exception("Skan yiqildi: %s", getattr(ch, "username", None) or ch.id)
+            log.info("Skan aylanasi tugadi — %d daqiqadan keyin yangi postlarni tekshiraman", SCAN_INTERVAL // 60)
+            await asyncio.sleep(SCAN_INTERVAL)
 
     async def scan_channel(self, ch, limit: int | None) -> None:
         """Kanal postlarini pastdan tepaga (yangidan eskiga) bittalab ishlash. Qayerga yetgani bazada saqlanadi:
@@ -290,6 +352,8 @@ class App:
                 while (job := self.db.job(job_id))["status"] in ACTIVE:
                     step = getattr(self, f"step_{job['status']}")
                     await step(job)
+            except Teach as e:
+                await self.ask_teach(self.db.job(job_id), e)
             except NeedHuman as e:
                 await self.fail(job_id, str(e))
             except errors.FloodWaitError as e:
@@ -297,6 +361,27 @@ class App:
             except Exception as e:
                 log.exception("Vazifa #%d yiqildi", job_id)
                 await self.fail(job_id, f"Xatolik: {type(e).__name__}: {e}")
+
+    async def ask_teach(self, job, e: Teach) -> None:
+        texts = [b.text for b in buttons(e.msg)]
+        body = re.sub(r"\s*\n\s*", " / ", (e.msg.message or "").strip())
+        lines = [
+            f"📚 <b>@{escape(e.bot)}</b> ni o'rgatish kerak — {escape(str(e))}",
+            f"🎬 {escape(job['title'] or '?')}",
+            f"📎 {await self.post_link(job)}",
+            "",
+            f"<i>Botning oxirgi xabari:</i> {escape(body[:400]) or '—'}",
+            "",
+            *[f"{i}. {escape(t)}" for i, t in enumerate(texts, 1)],
+            "",
+            "Qaysi tugmani bosish kerak? Raqamini shu xabarga <b>javob qilib</b> yuboring <i>(o'tkazish — 0)</i>",
+        ]
+        # O'rgangach qaysi bosqichdan davom etiladi
+        resume = "collecting" if job["next_ep"] is not None else "checking" if job["kawaii_id"] else "probing"
+        note = json.dumps({"bot": e.bot, "role": e.role, "buttons": texts, "resume": resume}, ensure_ascii=False)
+        msg = await self.tell_owner("\n".join(lines))
+        log.info("Vazifa #%d: @%s ni o'rgatish so'raldi", job["id"], e.bot)
+        self.db.update_job(job["id"], status="need_teach", note=note, owner_msg=msg.id if msg else None)
 
     def remember(self, job, kid: int) -> None:
         """Nom va manba (bot + start parametri) → Kawaii ID: keyingi qismlarda so'ramaslik uchun."""
